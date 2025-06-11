@@ -1,0 +1,9 @@
+numpy
+Pillow
+PySide6
+psd-tools
+customtkinter
+tkinterdnd2
+tifffile
+imageio
+pillow-heif
