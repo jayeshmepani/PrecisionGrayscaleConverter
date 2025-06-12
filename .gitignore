@@ -1,6 +1,8 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
+*.pyd
 *$py.class
 
 # Distribution / packaging
@@ -27,23 +29,30 @@ coverage.xml
 *.cover
 .hypothesis/
 
-# VS Code
-.vscode/
-
-# OS files
-.DS_Store
-Thumbs.db
-
 # PyInstaller
 *.manifest
-*.spec
 
 # Installer output
 *.exe
 *.msi
 *.dll
-*.pyd
 
-# Ignore build and dist folders
-build/
-dist/
+# Virtual Environments
+venv/
+.env
+
+# Databases / Temp files
+*.db
+*.sqlite3
+temp_output/
+
+# Node/Tailwind
+node_modules/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
