@@ -28,12 +28,25 @@ A modern desktop application for advanced grayscale image conversion, batch proc
 - [numpy](https://numpy.org/)
 - [tifffile](https://pypi.org/project/tifffile/)
 - [imageio](https://pypi.org/project/imageio/)
+- [opencv-python-headless](https://pypi.org/project/opencv-python-headless/)
 - [pillow-heif](https://pypi.org/project/pillow-heif/) (optional, for HEIC/HEIF)
 - [tkinterdnd2](https://pypi.org/project/tkinterdnd2/)
 
 Install all dependencies:
 ```sh
 pip install -r requirements.txt
+```
+
+## requirements.txt
+```
+customtkinter
+Pillow
+numpy
+tifffile
+imageio
+opencv-python-headless
+pillow-heif
+tkinterdnd2
 ```
 
 ## Usage
