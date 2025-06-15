@@ -9,19 +9,18 @@ from pathlib import Path
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import json
 import traceback
+import io
 
-# Use tifffile directly for robust TIFF saving
 try:
     import tifffile
 except ImportError:
     messagebox.showerror("Dependency Missing", "The 'tifffile' library is required. Please run: pip install tifffile")
     exit()
-    
-# Keep imageio for other formats if needed, or rely on Pillow
+
 try:
-    import imageio.v2 as imageio
+    import cv2
 except ImportError:
-    messagebox.showerror("Dependency Missing", "The 'imageio' library is required. Please run: pip install imageio")
+    messagebox.showerror("Dependency Missing", "The 'opencv-python' library is required. Please run: pip install opencv-python-headless")
     exit()
 
 try:
@@ -34,7 +33,6 @@ except ImportError:
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green")
 
-# ... (Tooltip and AdvancedExportDialog classes remain unchanged, paste them here) ...
 class Tooltip:
     def __init__(self, widget, text):
         self.widget = widget
@@ -71,10 +69,8 @@ class AdvancedExportDialog(ctk.CTkToplevel):
         self.original_info = original_info
         self.original_aspect_ratio = original_info.get('size', (1,1))[0] / original_info.get('size', (1,1))[1] if original_info.get('size', (1,1))[1] != 0 else 1
         self.icc_profiles = self.scan_for_icc_profiles()
-        
         self.setup_ui()
         self.after(10, self.update_ui_for_format)
-
         self.protocol("WM_DELETE_WINDOW", self.on_cancel)
         self.grab_set()
         self.master.wait_window(self)
@@ -92,38 +88,29 @@ class AdvancedExportDialog(ctk.CTkToplevel):
 
     def setup_ui(self):
         self.grid_columnconfigure(0, weight=1)
-
         basic_format_frame = ctk.CTkFrame(self)
         basic_format_frame.grid(row=0, column=0, padx=15, pady=10, sticky="ew")
         basic_format_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(basic_format_frame, text="Format Options", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, columnspan=2, pady=(0, 10), sticky="w")
-        
         ctk.CTkLabel(basic_format_frame, text="File Format:", anchor="w").grid(row=1, column=0, padx=10, pady=5, sticky="w")
         file_formats = [".png", ".tiff", ".jpeg", ".webp", ".bmp"]
         if HEIF_SUPPORT: file_formats.append(".heic")
         self.format_var = ctk.StringVar(value=".png")
         self.format_menu = ctk.CTkOptionMenu(basic_format_frame, variable=self.format_var, values=file_formats, command=self.update_ui_for_format)
         self.format_menu.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
-
         ctk.CTkLabel(basic_format_frame, text="Bit Depth:", anchor="w").grid(row=2, column=0, padx=10, pady=5, sticky="w")
         self.bit_depth_var = ctk.StringVar(value=f"{self.original_info.get('bit_depth', 8)}-bit")
         self.bit_depth_menu = ctk.CTkOptionMenu(basic_format_frame, variable=self.bit_depth_var, values=["8-bit", "16-bit"])
         self.bit_depth_menu.grid(row=2, column=1, padx=10, pady=5, sticky="ew")
-
         self.specific_options_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.specific_options_frame.grid(row=1, column=0, padx=15, pady=0, sticky="new")
         self.specific_options_frame.grid_columnconfigure(0, weight=1)
-
         self.quality_label = ctk.CTkLabel(self.specific_options_frame, text="Quality (95%):", anchor="w")
         self.quality_slider = ctk.CTkSlider(self.specific_options_frame, from_=0, to=100, command=lambda v: self.quality_label.configure(text=f"Quality ({int(v)}%):"))
         self.quality_slider.set(95)
         self.subsampling_label = ctk.CTkLabel(self.specific_options_frame, text="Chroma Subsampling:", anchor="w")
         self.subsampling_var = ctk.StringVar(value="4:4:4 (Best)")
         self.subsampling_menu = ctk.CTkOptionMenu(self.specific_options_frame, variable=self.subsampling_var, values=["4:4:4 (Best)", "4:2:2 (High)", "4:2:0 (Standard)"])
-        self.color_range_label = ctk.CTkLabel(self.specific_options_frame, text="Color Range:", anchor="w")
-        self.color_range_var = ctk.StringVar(value="Preserve Original")
-        self.color_range_menu = ctk.CTkOptionMenu(self.specific_options_frame, variable=self.color_range_var, values=["Preserve Original", "Full", "Limited"])
-
         dims_frame = ctk.CTkFrame(self)
         dims_frame.grid(row=2, column=0, padx=15, pady=10, sticky="ew")
         dims_frame.grid_columnconfigure(1, weight=1)
@@ -150,7 +137,6 @@ class AdvancedExportDialog(ctk.CTkToplevel):
             dpi_to_set = dpi_val[0] if isinstance(dpi_val, (tuple, list)) else dpi_val
             self.dpi_entry.insert(0, str(int(dpi_to_set)))
         self.dpi_entry.grid(row=2, column=1, padx=10, pady=5, sticky="ew")
-
         meta_frame = ctk.CTkFrame(self)
         meta_frame.grid(row=3, column=0, padx=15, pady=10, sticky="ew")
         meta_frame.grid_columnconfigure(1, weight=1)
@@ -163,55 +149,36 @@ class AdvancedExportDialog(ctk.CTkToplevel):
         self.alpha_check = ctk.CTkCheckBox(meta_frame, text="Preserve Transparency (Alpha Channel)", variable=self.alpha_var)
         self.alpha_check.grid(row=2, column=0, columnspan=2, padx=10, pady=10, sticky="w")
         self.strip_metadata_var = ctk.BooleanVar(value=False)
-        self.strip_metadata_check = ctk.CTkCheckBox(meta_frame, text="Strip all metadata (EXIF, PNG Chunks, etc.)", variable=self.strip_metadata_var)
+        self.strip_metadata_check = ctk.CTkCheckBox(meta_frame, text="Strip all metadata (EXIF, etc.)", variable=self.strip_metadata_var)
         self.strip_metadata_check.grid(row=3, column=0, columnspan=2, padx=10, pady=10, sticky="w")
-
         preset_frame = ctk.CTkFrame(self)
         preset_frame.grid(row=4, column=0, padx=15, pady=10, sticky="ew")
         ctk.CTkButton(preset_frame, text="Save Preset", command=self.save_preset).pack(side="left", expand=True, padx=5)
         ctk.CTkButton(preset_frame, text="Load Preset", command=self.load_preset).pack(side="left", expand=True, padx=5)
-        
         ctk.CTkButton(self, text="Export", command=self.on_export, height=40, font=ctk.CTkFont(weight="bold")).grid(row=5, column=0, padx=15, pady=(10, 15), sticky="ew")
         
     def update_ui_for_format(self, selected_format=None):
-        widgets_to_forget = [
-            self.quality_label, self.quality_slider,
-            self.subsampling_label, self.subsampling_menu,
-            self.color_range_label, self.color_range_menu
-        ]
+        widgets_to_forget = [self.quality_label, self.quality_slider, self.subsampling_label, self.subsampling_menu]
         for widget in widgets_to_forget:
-            try:
-                widget.grid_forget()
-            except _tkinter.TclError:
-                pass 
+            try: widget.grid_forget()
+            except _tkinter.TclError: pass 
         self.specific_options_frame.configure(fg_color="transparent")
-
         fmt = self.format_var.get()
         row = 0
-        
         if fmt in [".jpeg", ".webp", ".heic"]:
             self.quality_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
             self.quality_slider.grid(row=row, column=1, padx=10, pady=5, sticky="ew")
             row += 1
-        
-        if fmt == ".jpeg":
+        if fmt in [".jpeg", ".heic"]:
             self.subsampling_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
             self.subsampling_menu.grid(row=row, column=1, padx=10, pady=5, sticky="ew")
             row += 1
-
-        if fmt in [".jpeg", ".png"]:
-            self.color_range_label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
-            self.color_range_menu.grid(row=row, column=1, padx=10, pady=5, sticky="ew")
-            row += 1
-        
         if row > 0:
             self.specific_options_frame.configure(fg_color=("gray92", "gray14"), corner_radius=5)
             self.specific_options_frame.grid_columnconfigure(1, weight=1)
-
         is_16bit_supported = fmt in [".png", ".tiff"]
         if not is_16bit_supported and self.bit_depth_var.get() == "16-bit": self.bit_depth_var.set("8-bit")
         self.bit_depth_menu.configure(values=["8-bit", "16-bit"] if is_16bit_supported else ["8-bit"])
-        
         has_alpha_support = fmt in [".png", ".tiff", ".webp", ".heic"]
         self.alpha_check.configure(state="normal" if has_alpha_support else "disabled")
         if not has_alpha_support: self.alpha_var.set(False)
@@ -238,53 +205,32 @@ class AdvancedExportDialog(ctk.CTkToplevel):
         dpi = int(self.dpi_entry.get()) if self.dpi_entry.get().isdigit() else None
         profile_path = self.icc_profiles.get(self.color_space_var.get())
         fmt = self.format_var.get()
-
-        settings = {
-            "format": fmt,
-            "bit_depth": int(self.bit_depth_var.get().replace('-bit', '')),
-            "size": (w, h), "dpi": dpi, "icc_profile_path": profile_path,
-            "preserve_alpha": self.alpha_var.get(), "strip_metadata": self.strip_metadata_var.get()
-        }
-
-        if fmt in [".jpeg", ".webp", ".heic"]:
-            settings['quality'] = int(self.quality_slider.get())
-        if fmt == ".jpeg":
+        settings = {"format": fmt, "bit_depth": int(self.bit_depth_var.get().replace('-bit', '')), "size": (w, h), "dpi": dpi, "icc_profile_path": profile_path, "preserve_alpha": self.alpha_var.get(), "strip_metadata": self.strip_metadata_var.get()}
+        if fmt in [".jpeg", ".webp", ".heic"]: settings['quality'] = int(self.quality_slider.get())
+        if fmt in [".jpeg", ".heic"]:
             subsampling_map = {"4:4:4 (Best)": 0, "4:2:2 (High)": 1, "4:2:0 (Standard)": 2}
-            settings['subsampling_val'] = subsampling_map.get(self.subsampling_var.get(), 0)
-            settings['subsampling_str'] = self.subsampling_var.get()
-        if fmt in [".jpeg", ".png"]:
-            settings['color_range'] = self.color_range_var.get()
-
+            settings['subsampling'] = subsampling_map.get(self.subsampling_var.get(), 0)
         return settings
 
     def set_settings(self, settings):
         self.format_var.set(settings.get("format", ".png"))
         self.bit_depth_var.set(f'{settings.get("bit_depth", 8)}-bit')
-        
         self.quality_slider.set(settings.get("quality", 95))
-        
         subsampling_rev_map = {0: "4:4:4 (Best)", 1: "4:2:2 (High)", 2: "4:2:0 (Standard)"}
-        self.subsampling_var.set(subsampling_rev_map.get(settings.get("subsampling_val", 0)))
-        
-        self.color_range_var.set(settings.get("color_range", "Preserve Original"))
-        
+        self.subsampling_var.set(subsampling_rev_map.get(settings.get("subsampling", 0)))
         w, h = settings.get("size", self.original_info['size'])
         self.width_var.set(str(w))
         self.height_var.set(str(h))
         self.dpi_entry.delete(0, "end")
         if settings.get("dpi"): self.dpi_entry.insert(0, str(settings.get("dpi")))
-        
         profile_name_to_set = "sRGB Color Space Profile"
         if settings.get("icc_profile_path"):
             for name, path in self.icc_profiles.items():
                 if path == settings["icc_profile_path"]:
-                    profile_name_to_set = name
-                    break
+                    profile_name_to_set = name; break
         self.color_space_var.set(profile_name_to_set)
-        
         self.alpha_var.set(settings.get("preserve_alpha", True))
         self.strip_metadata_var.set(settings.get("strip_metadata", False))
-        
         self.update_ui_for_format()
 
     def save_preset(self):
@@ -307,7 +253,6 @@ class AdvancedExportDialog(ctk.CTkToplevel):
     def on_cancel(self):
         self.result = None
         self.destroy()
-
 
 class MainApplication(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
@@ -350,8 +295,8 @@ class MainApplication(ctk.CTkFrame):
         mode_frame = ctk.CTkFrame(control_frame, fg_color="transparent")
         mode_frame.pack(side="left")
         ctk.CTkLabel(mode_frame, text="Conversion Mode:").pack(side="left", padx=(0, 10))
-        self.conversion_mode_var = ctk.StringVar(value="L*a*b* (L*)")
-        modes = ["BT.709", "L*a*b* (L*)", "HSL (Lightness)", "HSV (Value)", "BT.601", "BT.2100", "Gamma"]
+        self.conversion_mode_var = ctk.StringVar(value="Rec. 709")
+        modes = ["L*a*b* (L*)", "Gamma", "Rec. 709", "HSL (Lightness)", "HSV (Value)", "Rec. 601", "Rec. 2100"]
         self.mode_menu = ctk.CTkSegmentedButton(mode_frame, values=modes, variable=self.conversion_mode_var, command=self.update_preview)
         self.mode_menu.pack(side="left")
         info_frame = ctk.CTkFrame(tab, fg_color="transparent")
@@ -405,16 +350,18 @@ class MainApplication(ctk.CTkFrame):
                 if task_type == 'load': self.result_queue.put(('load_success', self._perform_load(data)))
                 elif task_type == 'convert': self.result_queue.put(('convert_success', self.convert_to_enhanced_grayscale(*data)))
                 elif task_type == 'resize_display': self.result_queue.put(('display_ready', (data[0], self._perform_resize_for_display(*data))))
-                elif task_type == 'save': self._perform_save(*data); self.result_queue.put(('save_success', data[2]))
+                elif task_type == 'save':
+                    self._perform_save(*data)
+                    self.result_queue.put(('save_success', data[2]))
                 elif task_type == 'batch_process':
                     in_path, out_path, settings = data
                     img_obj, info = self._perform_load(in_path)
                     gray_array, alpha_img = self.convert_to_enhanced_grayscale(img_obj, settings['conversion_mode'], settings.get('bit_depth', info['bit_depth']))
                     self._perform_save(gray_array, alpha_img, out_path, settings, info)
                     self.result_queue.put(('batch_item_success', in_path))
-            except Exception:
-                self.result_queue.put(('task_failed', (data, traceback.format_exc())))
-    
+            except Exception as e:
+                self.result_queue.put(('task_failed', (data, traceback.format_exc(), e)))
+
     def process_results(self):
         try:
             while not self.result_queue.empty():
@@ -434,182 +381,105 @@ class MainApplication(ctk.CTkFrame):
                     self._update_batch_item_status(data, "✅ Done", "green")
                     self.batch_progress.set(self.batch_progress.get() + (1/len(self.batch_files)))
                 elif result_type == 'task_failed':
-                    task_data, error_msg = data
+                    task_data, error_msg, exception = data
                     print(f"Task failed.\nData: {task_data}\nError: {error_msg}")
-                    in_path = None
-                    if isinstance(task_data, tuple) and len(task_data) > 0:
-                        if isinstance(task_data[0], np.ndarray): # save task
-                            in_path = task_data[4].get('filepath', 'Unknown File')
-                        elif isinstance(task_data[0], str): # batch task
-                            in_path = task_data[0]
-                    if in_path:
-                        self._update_batch_item_status(in_path, "❌ Error", "red")
-
                     self.stop_processing_indicator("An error occurred.", "red")
-                    messagebox.showerror("Processing Error", f"Task failed:\n{error_msg}")
+                    messagebox.showerror("Processing Error", f"Task failed:\n{exception}")
         finally: 
             self.after(100, self.process_results)
 
-    def convert_to_enhanced_grayscale(self, image, mode, target_bit_depth):
-        if image.mode == 'L' and target_bit_depth == 8: return np.array(image), None
-        
-        has_alpha = 'A' in image.getbands()
-        alpha_image_out = image.getchannel('A') if has_alpha else None
-        
-        if image.mode not in ('RGB', 'RGBA'):
-             rgb_image = image.convert('RGBA' if has_alpha else 'RGB')
+    def to_linear(self, c):
+        return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+    def to_srgb(self, c):
+        return np.where(c <= 0.0031308, c * 12.92, 1.055 * (c ** (1/2.4)) - 0.055)
+
+    def convert_to_enhanced_grayscale(self, image: Image.Image, mode: str, target_bit_depth: int):
+        if image.mode == 'RGBA': cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGBA2BGRA)
+        elif image.mode == 'RGB': cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        elif image.mode == 'LA':
+            L, A_pil = image.split()
+            cv_image = cv2.cvtColor(np.array(L), cv2.COLOR_GRAY2BGRA)
+            cv_image[:, :, 3] = np.array(A_pil)
+        elif image.mode == 'L': cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_GRAY2BGR)
         else:
-             rgb_image = image
-
-        source_is_16bit_depth = np.array(image).dtype == np.uint16
-        source_dtype = np.float32
-
-        if source_is_16bit_depth:
-            rgb_array = np.array(rgb_image.convert('RGB'), dtype=source_dtype) / 65535.0
+            rgba_image = image.convert("RGBA")
+            cv_image = cv2.cvtColor(np.array(rgba_image), cv2.COLOR_RGBA2BGRA)
+        has_alpha = cv_image.shape[2] == 4
+        alpha_channel_pil = Image.fromarray(cv_image[:, :, 3]) if has_alpha else None
+        if cv_image.dtype == np.uint8: cv_image = cv_image.astype(np.uint16) * 257
+        elif cv_image.dtype != np.uint16: raise ValueError(f"Unsupported image dtype {cv_image.dtype}")
+        B, G, R = cv2.split(cv_image)[:3]
+        Rf, Gf, Bf = R.astype(np.float64)/65535.0, G.astype(np.float64)/65535.0, B.astype(np.float64)/65535.0
+        mode_map = {"Rec. 601": '601', "Rec. 709": '709', "Rec. 2100": '2100', "Gamma": 'gamma'}
+        script_mode = mode_map.get(mode, '709')
+        if mode in ["L*a*b* (L*)", "HSV (Value)", "HSL (Lightness)"]:
+            rgb_image_pil = image.convert('RGB')
+            if mode == "L*a*b* (L*)":
+                l, _, _ = rgb_image_pil.convert('LAB').split()
+                gray_float = np.array(l, dtype=np.float64) / 255.0
+            elif mode == "HSV (Value)":
+                _, _, v = rgb_image_pil.convert('HSV').split()
+                gray_float = np.array(v, dtype=np.float64) / 255.0
+            else:
+                rgb_array_float = np.array(rgb_image_pil, dtype=np.float64) / 255.0
+                cmax, cmin = np.maximum.reduce(rgb_array_float, axis=-1), np.minimum.reduce(rgb_array_float, axis=-1)
+                gray_float = (cmax + cmin) / 2.0
+        elif script_mode == 'gamma':
+            Rl, Gl, Bl = self.to_linear(Rf), self.to_linear(Gf), self.to_linear(Bf)
+            Yl = 0.2126 * Rl + 0.7152 * Gl + 0.0722 * Bl
+            gray_float = self.to_srgb(Yl)
         else:
-            rgb_array = np.array(rgb_image.convert('RGB'), dtype=source_dtype) / 255.0
-
-        if mode == "L*a*b* (L*)":
-            lab_image = rgb_image.convert('RGB').convert('LAB')
-            l_channel, _, _ = lab_image.split()
-            gray_float = np.array(l_channel, dtype=source_dtype) / 255.0
-        elif mode == "HSV (Value)":
-            hsv_image = rgb_image.convert('RGB').convert('HSV')
-            _, _, v_channel = hsv_image.split()
-            gray_float = np.array(v_channel, dtype=source_dtype) / 255.0
-        elif mode == "HSL (Lightness)":
-            def rgb_to_hsl_lightness(rgb):
-                cmax = np.maximum.reduce(rgb, axis=-1)
-                cmin = np.minimum.reduce(rgb, axis=-1)
-                return (cmax + cmin) / 2.0
-            gray_float = rgb_to_hsl_lightness(rgb_array)
-        elif mode == "Gamma":
-            linear_rgb = np.power(rgb_array, 2.2)
-            coeffs = [0.2126, 0.7152, 0.0722] # BT.709
-            linear_gray = np.dot(linear_rgb, coeffs)
-            gray_float = np.power(linear_gray, 1/2.2)
-        else: # BT.XXX standards
-            coeffs = {"BT.601": [0.299, 0.587, 0.114], "BT.709": [0.2126, 0.7152, 0.0722], "BT.2100": [0.2627, 0.6780, 0.0593]}.get(mode, [0.2126, 0.7152, 0.0722])
-            gray_float = np.dot(rgb_array, coeffs)
-        
+            weights = {'601':(0.299,0.587,0.114),'709':(0.2126,0.7152,0.0722),'2100':(0.2627,0.6780,0.0593)}
+            wR, wG, wB = weights[script_mode]
+            gray_float = wR * Rf + wG * Gf + wB * Bf
         gray_float = np.clip(gray_float, 0, 1)
-        
-        dtype = np.uint16 if target_bit_depth == 16 else np.uint8
-        multiplier = 65535 if target_bit_depth == 16 else 255
-        final_array = (gray_float * multiplier).astype(dtype)
+        if target_bit_depth == 16: multiplier, dtype = 65535, np.uint16
+        else: multiplier, dtype = 255, np.uint8
+        final_array = np.round(gray_float * multiplier).astype(dtype)
+        return final_array, alpha_channel_pil
 
-        return final_array, alpha_image_out
-    
     def _perform_save(self, gray_array, alpha_image, filepath, settings, original_info):
         file_ext = Path(filepath).suffix.lower()
-        is_16bit = settings['bit_depth'] == 16
-
-        # 1. Create Pillow image object from grayscale numpy array
-        target_mode = 'I;16' if is_16bit else 'L'
-        final_image = Image.fromarray(gray_array, mode=target_mode)
-
-        # 2. Handle Alpha Channel, ensuring modes match before merging
-        has_alpha = alpha_image and settings['preserve_alpha'] and file_ext in ['.png', '.tiff', '.webp', '.heic']
-
-        # --- 16-bit TIFF with alpha: use tifffile and stacked array ---
-        if is_16bit and has_alpha and file_ext == '.tiff':
-            alpha_pil = alpha_image
-            # Convert alpha to 16-bit numpy array
-            alpha_arr = np.array(alpha_pil.convert('L'), dtype=np.uint8)
-            alpha_arr = (alpha_arr.astype(np.uint32) * 65535 // 255).astype(np.uint16)
-            stacked = np.stack([gray_array, alpha_arr], axis=-1)
-            # Prepare tifffile kwargs
-            tiff_kwargs = {'photometric': 'minisblack', 'extrasamples': ['unassalpha']}
-            icc_profile = settings.get('icc_profile_path') or original_info.get('icc_profile')
-            dpi_val = settings.get('dpi')
-            if dpi_val:
-                tiff_kwargs['resolution'] = (dpi_val, dpi_val, 'INCH')
-            # Handle ICC profile as extratag (34675)
-            extratags = []
-            if icc_profile:
-                with open(icc_profile, "rb") if isinstance(icc_profile, str) else None as f:
-                    icc_bytes = f.read() if f else icc_profile
-                extratags.append((34675, 'B', len(icc_bytes), icc_bytes, False))
-            if extratags:
-                tiff_kwargs['extratags'] = extratags
-            tifffile.imwrite(filepath, stacked, **tiff_kwargs)
+        is_high_bit_depth = settings["bit_depth"] > 8
+        has_alpha = alpha_image and settings["preserve_alpha"]
+        if file_ext == ".tiff" and is_high_bit_depth and has_alpha:
+            alpha_8bit_np = np.array(alpha_image.convert("L"))
+            A16 = (alpha_8bit_np.astype(np.uint16)) * 257
+            stacked = np.stack([gray_array, A16], axis=-1)
+            tifffile.imwrite(filepath, stacked, photometric="minisblack", extrasamples=["unassalpha"])
             return
-
-        # --- 16-bit PNG with alpha: warn and drop alpha ---
-        if is_16bit and has_alpha and file_ext == '.png':
-            messagebox.showwarning("Alpha Channel Not Supported",
-                "16-bit PNG with alpha is not supported. The alpha channel will be discarded.")
-            has_alpha = False
-
-        # --- 8-bit with alpha: use Image.merge('LA', ...) ---
-        if not is_16bit and has_alpha:
-            alpha_pil = alpha_image
-            if alpha_pil.mode != 'L':
-                alpha_pil = alpha_pil.convert('L')
-            final_image = Image.merge('LA', (final_image, alpha_pil))
-
-        # 3. Handle Resizing
-        if settings['size'] != final_image.size:
-            final_image = final_image.resize(settings['size'], Image.Resampling.LANCZOS)
-
-        # 4. Prepare Metadata
-        exif_obj = Image.Exif()
-        icc_profile = None
-        dpi = None
-
-        if not settings['strip_metadata']:
-            exif_bytes = original_info.get('exif')
-            if exif_bytes:
-                try: exif_obj.load(exif_bytes)
-                except Exception: pass
-
-            icc_profile = settings.get('icc_profile_path') or original_info.get('icc_profile')
-            dpi_val = settings.get('dpi')
-            if dpi_val:
-                dpi = (dpi_val, dpi_val)
-
-        # 5. Save the image using the most appropriate library/method
-        if file_ext == '.tiff':
-            # If we get here, it's not 16-bit+alpha, so just save grayscale
-            tiff_kwargs = {'photometric': 'minisblack'}
-            icc_profile = settings.get('icc_profile_path') or original_info.get('icc_profile')
-            if dpi:
-                tiff_kwargs['resolution'] = (dpi[0], dpi[1], 'INCH')
-            extratags = []
-            if icc_profile:
-                with open(icc_profile, "rb") if isinstance(icc_profile, str) else None as f:
-                    icc_bytes = f.read() if f else icc_profile
-                extratags.append((34675, 'B', len(icc_bytes), icc_bytes, False))
-            if extratags:
-                tiff_kwargs['extratags'] = extratags
-            tifffile.imwrite(filepath, np.array(final_image), **tiff_kwargs)
-        else:
-            save_kwargs = {}
-            # Always ensure icc_profile is bytes, not a file path
-            if icc_profile:
-                if isinstance(icc_profile, str):
-                    with open(icc_profile, "rb") as f:
-                        save_kwargs['icc_profile'] = f.read()
-                else:
-                    save_kwargs['icc_profile'] = icc_profile
-            if dpi: save_kwargs['dpi'] = dpi
-            if len(exif_obj) > 0:
-                if file_ext == '.jpeg':
-                    subsampling_val = settings.get('subsampling_val')
-                    if subsampling_val is not None:
-                        subsampling_map = {0: (1, 1), 1: (2, 1), 2: (2, 2)}
-                        exif_obj[531] = subsampling_map.get(subsampling_val, (2, 2))
-                save_kwargs['exif'] = exif_obj.tobytes()
-
-            if file_ext == '.jpeg':
-                if final_image.mode in ['LA', 'RGBA', 'P', 'PA']:
-                    final_image = final_image.convert('L')
-                final_image.save(filepath, "JPEG", 
-                                 quality=settings.get('quality', 95), 
-                                 subsampling=settings.get('subsampling_val', 0), 
-                                 **save_kwargs)
-            else:
-                final_image.save(filepath, **save_kwargs)
+        if file_ext == ".png" and is_high_bit_depth and has_alpha:
+            Y16 = gray_array
+            alpha_8bit_np = np.array(alpha_image.convert("L"))
+            A16 = (alpha_8bit_np.astype(np.uint16)) * 257
+            out_cv = cv2.merge([Y16, Y16, Y16, A16])
+            success, buffer = cv2.imencode(file_ext, out_cv)
+            if not success: raise IOError("Failed to encode 16-bit PNG with alpha.")
+            with open(filepath, 'wb') as f: f.write(buffer)
+            return
+        target_mode = "I;16" if is_high_bit_depth else "L"
+        final_image = Image.fromarray(gray_array, mode=target_mode)
+        if settings.get("size") != original_info['size']:
+            final_image = final_image.resize(settings["size"], Image.Resampling.LANCZOS)
+        if has_alpha:
+            final_image = Image.merge("LA", (final_image.convert("L"), alpha_image.convert("L")))
+        save_kwargs = {}
+        if not settings.get("strip_metadata", False):
+            icc_profile_path = settings.get("icc_profile_path")
+            if icc_profile_path:
+                with open(icc_profile_path, 'rb') as f: save_kwargs['icc_profile'] = f.read()
+            elif original_info.get("icc_profile"): save_kwargs['icc_profile'] = original_info.get("icc_profile")
+            dpi = settings.get("dpi")
+            if dpi: save_kwargs['dpi'] = (dpi, dpi)
+        format_map = {".jpeg": "JPEG", ".jpg": "JPEG", ".png": "PNG", ".tiff": "TIFF", ".webp": "WEBP", ".bmp": "BMP", ".heic": "HEIF"}
+        file_format = format_map.get(file_ext, "PNG")
+        if file_ext in [".jpg", ".jpeg"]:
+            final_image = final_image.convert("L")
+            save_kwargs.update({"quality": settings.get("quality", 95), "subsampling": settings.get("subsampling", 0)})
+        elif file_ext == ".heic":
+             save_kwargs.update({"quality": settings.get("quality", 95), "chroma": settings.get("subsampling", 0)})
+        final_image.save(filepath, format=file_format, **save_kwargs)
 
     def on_drop(self, event):
         paths = self.master.tk.splitlist(event.data)
@@ -636,34 +506,24 @@ class MainApplication(ctk.CTkFrame):
         except: messagebox.showerror("Clipboard Error", "Could not access clipboard.")
 
     def export_image(self):
-        if self.original_image is None:
-            messagebox.showwarning("Warning", "No image to export.")
-            return
-
+        if self.original_image is None: messagebox.showwarning("Warning", "No image to export."); return
         dialog = AdvancedExportDialog(self, self.original_info)
         settings = dialog.result
-        if not settings:
-            return
-        
+        if not settings: return
         default_name = Path(self.original_info.get('filepath', 'image.png')).stem + "_grayscale"
         file_ext = settings['format']
         filepath = filedialog.asksaveasfilename(initialfile=default_name, defaultextension=file_ext, filetypes=[(f"{file_ext.upper()[1:]} files", f"*{file_ext}")])
         if not filepath: return
-
         self.start_processing_indicator("Exporting image...")
         gray_array, alpha_img = self.convert_to_enhanced_grayscale(self.original_image, self.conversion_mode_var.get(), settings['bit_depth'])
         self.task_queue.put(('save', (gray_array, alpha_img, filepath, settings, self.original_info)))
 
     def _perform_load(self, source):
         pil_image = None
-        if isinstance(source, str):
-            pil_image = Image.open(source)
-        elif isinstance(source, Image.Image):
-            pil_image = source
-        
+        if isinstance(source, str): pil_image = Image.open(source)
+        elif isinstance(source, Image.Image): pil_image = source
         pil_image.load()
         info = self.analyze_image_properties(pil_image)
-        
         return pil_image, info
         
     def add_batch_files(self, filepaths=None):
@@ -710,20 +570,20 @@ class MainApplication(ctk.CTkFrame):
         for item in self.batch_files:
             if item['path'] == path: item['status_label'].configure(text=text, text_color=color); return
 
-    def _perform_resize_for_display(self, canvas, image):
+    def _perform_resize_for_display(self, canvas, image: Image.Image):
+        # CORRECTED FUNCTION
         w, h = canvas.winfo_width(), canvas.winfo_height()
         if w <= 1 or h <= 1: return None
         
+        # This function should NOT do any color conversion. It just resizes.
+        # It needs to handle color images for the 'original' canvas.
         display_image = image
-        # Standardize for display by converting to 8-bit L
-        if image.mode != 'L':
-            try:
-                display_image = image.convert('L')
-            except Exception: # Failsafe for unusual modes
-                return None
-        
+        if display_image.mode not in ['RGB', 'RGBA', 'L', 'LA']:
+            display_image = image.convert('RGBA')
+
         img_w, img_h = display_image.size
-        scale = min(w / img_w, h / img_h, 1.0) if img_w > 0 and img_h > 0 else 1.0
+        if img_w == 0 or img_h == 0: return None
+        scale = min(w / img_w, h / img_h, 1.0)
         new_size = (int(img_w * scale), int(img_h * scale))
         
         if new_size[0] < 1 or new_size[1] < 1: return None
@@ -740,22 +600,22 @@ class MainApplication(ctk.CTkFrame):
         self.stop_processing_indicator(f"Loaded: {os.path.basename(self.original_info.get('filepath', 'clipboard'))}")
         self.info_var.set(self.original_info['display_text'])
         self.export_button.configure(state="disabled")
-        # Always display the original image as loaded (not grayscale)
-        self.request_display_update('original')
+        self.request_display_update('original') # THIS IS KEY - always show original first
         self.update_preview()
 
     def _handle_convert_success(self):
         self.stop_processing_indicator("Enhanced preview ready.")
         self.export_button.configure(state="normal")
-        # Only update the preview canvas, not the original
-        self.request_display_update('preview')
+        self.request_display_update('preview') # THEN update the preview
 
     def request_display_update(self, canvas_name):
+        # CORRECTED FUNCTION
         image_to_display = None
-        if canvas_name == 'original':
-            # Always show the original loaded image, not the grayscale
+        if canvas_name == 'original' and self.original_image:
+            # For 'original', always use the original color image
             image_to_display = self.original_image
         elif canvas_name == 'preview' and self.preview_data is not None:
+            # For 'preview', use the grayscale numpy array
             mode = 'I;16' if self.preview_data.dtype == np.uint16 else 'L'
             image_to_display = Image.fromarray(self.preview_data, mode=mode)
 
@@ -775,35 +635,25 @@ class MainApplication(ctk.CTkFrame):
 
     def analyze_image_properties(self, image):
         info = {'filepath': getattr(image, 'filename', 'clipboard'), 'size': image.size, 'mode': image.mode}
-        
         info['exif'] = image.info.get('exif')
         info['icc_profile'] = image.info.get('icc_profile')
         info['dpi'] = image.info.get('dpi')
-
         try:
             dtype_str = str(np.array(image).dtype)
-            if '16' in dtype_str:
-                info['bit_depth'] = 16
-            elif '32' in dtype_str:
-                 info['bit_depth'] = 32
-            else:
-                 info['bit_depth'] = 8
+            if '16' in dtype_str: info['bit_depth'] = 16
+            elif '32' in dtype_str: info['bit_depth'] = 32
+            else: info['bit_depth'] = 8
         except Exception:
-            if image.mode in ('I;16', 'I;16B', 'I;16L', 'I;16N', 'I;16LA') or (image.mode == 'LA' and image.getextrema()[0][1] > 255):
-                info['bit_depth'] = 16
-            elif image.mode in ('I', 'F'):
-                info['bit_depth'] = 32
-            else:
-                info['bit_depth'] = 8
-
+            if image.mode in ('I;16', 'I;16B', 'I;16L', 'I;16N', 'I;16LA') or (image.mode == 'LA' and image.getextrema()[0][1] > 255): info['bit_depth'] = 16
+            elif image.mode in ('I', 'F'): info['bit_depth'] = 32
+            else: info['bit_depth'] = 8
         info['display_text'] = f"Size: {image.size[0]}×{image.size[1]} | Mode: {image.mode} | Bit Depth: {info['bit_depth']}-bit | {'ICC' if info['icc_profile'] else 'No ICC'}"
         return info
 
     def _update_canvas_image(self, canvas, photo_image):
-        if not photo_image:
-            return
+        if not photo_image: return
         canvas.delete("all")
-        canvas.photo = photo_image  # Prevent garbage collection
+        canvas.photo = photo_image
         x = (canvas.winfo_width() - photo_image.width()) // 2
         y = (canvas.winfo_height() - photo_image.height()) // 2
         canvas.create_image(x, y, anchor='nw', image=photo_image)
@@ -813,7 +663,7 @@ if __name__ == "__main__":
     root = TkinterDnD.Tk()
     root.withdraw()
     app_window = ctk.CTkToplevel()
-    app_window.title("Enhanced Precision Grayscale Converter v6.5.7")
+    app_window.title("Enhanced Precision Grayscale Converter")
     app_window.geometry("1400x900")
     app_window.minsize(1200, 800)
     app = MainApplication(master=app_window)

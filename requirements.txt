@@ -1,9 +1,10 @@
 numpy
 Pillow
-PySide6
 psd-tools
+PySide6
 customtkinter
 tkinterdnd2
 tifffile
 imageio
 pillow-heif
+opencv-python-headless
